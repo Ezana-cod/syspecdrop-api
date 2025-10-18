@@ -4,7 +4,7 @@
   "description": "This project was bootstrapped with Fastify-CLI.",
   "type": "module",
   "main": "src/app.ts",
-  "directories": {
+  "directories": { 
     "test": "test"
   },
   "scripts": {
