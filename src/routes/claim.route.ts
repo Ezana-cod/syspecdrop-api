@@ -12,6 +12,65 @@ import {
 } from '../middlewares/security.middleware.js';
 
 /**
+ * Detect file type from magic bytes (file signature)
+ */
+function detectFileType(buffer: Buffer): { ext: string; mimeType: string } {
+  // Check magic bytes (first few bytes of file)
+  const header = buffer.toString('hex', 0, 4);
+  
+  // ZIP-based formats (Office files)
+  if (buffer.toString('ascii', 0, 2) === 'PK') {
+    const content = buffer.toString('utf-8', 0, 1000); // Check first 1KB
+    if (content.includes('word/')) return { 
+      ext: 'docx', 
+      mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' 
+    };
+    if (content.includes('xl/')) return { 
+      ext: 'xlsx', 
+      mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' 
+    };
+    if (content.includes('ppt/')) return { 
+      ext: 'pptx', 
+      mimeType: 'application/vnd.openxmlformats-officedocument.presentationml.presentation' 
+    };
+    return { ext: 'zip', mimeType: 'application/zip' };
+  }
+  
+  // Common file types
+  if (header.startsWith('89504e47')) return { ext: 'png', mimeType: 'image/png' };
+  if (header.startsWith('ffd8ffe0') || header.startsWith('ffd8ffe1') || header.startsWith('ffd8ffe2')) {
+    return { ext: 'jpg', mimeType: 'image/jpeg' };
+  }
+  if (header.startsWith('25504446')) return { ext: 'pdf', mimeType: 'application/pdf' };
+  if (header.startsWith('47494638')) return { ext: 'gif', mimeType: 'image/gif' };
+  if (buffer.toString('ascii', 0, 4) === '%!PS') return { ext: 'ps', mimeType: 'application/postscript' };
+  
+  // Text files
+  if (header.startsWith('efbbbf') || isTextFile(buffer)) {
+    return { ext: 'txt', mimeType: 'text/plain' };
+  }
+  
+  // Default binary
+  return { ext: 'bin', mimeType: 'application/octet-stream' };
+}
+
+/**
+ * Check if buffer contains mostly printable text
+ */
+function isTextFile(buffer: Buffer): boolean {
+  const sample = buffer.subarray(0, Math.min(512, buffer.length));
+  let printable = 0;
+  
+  for (const byte of sample) {
+    if ((byte >= 32 && byte <= 126) || byte === 9 || byte === 10 || byte === 13) {
+      printable++;
+    }
+  }
+  
+  return printable / sample.length > 0.85; // 85% printable = text file
+}
+
+/**
  * Claim Route
  * Handles file claim with passphrase verification and metadata burning
  * Flow: Receiver → Hash Passphrase → Verify On-Chain → Retrieve IPFS → Decrypt → Burn Metadata
@@ -191,17 +250,43 @@ export default async function claimRoutes(fastify: FastifyInstance) {
         // Step 6: Decrypt file with symmetric key
         const encryptedFileBuffer = Buffer.from(fileResult.data);
         const decryptedFile = decryptFile(encryptedFileBuffer, symmetricKey);
-        const fileContent = decryptedFile.toString('base64');
 
-        request.log.info({ dropId }, 'V3: File decrypted and claimed successfully (can be claimed again)');
+        // Step 7: Detect file type from magic bytes
+        const { ext, mimeType } = detectFileType(decryptedFile);
+        const fileName = `drop-${dropId.substring(0, 8)}.${ext}`;
 
-        return reply.code(200).send({
-          success: true,
-          fileName: `drop-${dropId.substring(0, 8)}.bin`,
-          fileContent,
-          txHash,
-          message: 'Drop claimed successfully. File decrypted.',
-        });
+        request.log.info({ 
+          dropId, 
+          fileType: ext, 
+          fileSize: decryptedFile.length 
+        }, 'V3: File decrypted and claimed successfully (can be claimed again)');
+
+        // Check if user wants JSON response (for backward compatibility)
+        const format = (request.query as any)?.format;
+        if (format === 'json') {
+          return reply.code(200).send({
+            success: true,
+            fileName,
+            fileContent: decryptedFile.toString('base64'),
+            txHash,
+            fileType: ext,
+            mimeType,
+            message: 'Drop claimed successfully. File decrypted.',
+          });
+        }
+
+        // Default: Return actual file download
+        reply
+          .code(200)
+          .header('Content-Type', mimeType)
+          .header('Content-Disposition', `attachment; filename="${fileName}"`)
+          .header('Content-Length', decryptedFile.length)
+          .header('X-Transaction-Hash', txHash)
+          .header('X-Drop-Status', 'claimed')
+          .header('X-File-Type', ext)
+          .send(decryptedFile);
+
+        return reply;
       } catch (error: any) {
         request.log.error({ error: error.message }, 'Claim failed');
 
