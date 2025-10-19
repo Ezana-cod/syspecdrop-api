@@ -20,7 +20,11 @@ function detectFileType(buffer: Buffer): { ext: string; mimeType: string } {
   
   // ZIP-based formats (Office files)
   if (buffer.toString('ascii', 0, 2) === 'PK') {
-    const content = buffer.toString('utf-8', 0, 1000); // Check first 1KB
+    // Search for Office-specific markers in raw bytes (not UTF-8 decoded)
+    // These are ASCII strings that appear in the ZIP directory listings
+    const searchLength = Math.min(4000, buffer.length); // Search first 4KB
+    const content = buffer.toString('binary', 0, searchLength); // Use 'binary' to preserve bytes
+    
     if (content.includes('word/')) return { 
       ext: 'docx', 
       mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' 
